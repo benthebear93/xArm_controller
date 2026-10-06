@@ -1,0 +1,1 @@
+xarm-python-sdk==1.18.4 --hash=sha256:943ce66308bc49619386d6eaf428a2783bcd202c1fbe3fe79de87d5f89647989
