@@ -1,0 +1,2 @@
+# Preserve PDF byte offsets and avoid treating document bytes as source diffs.
+*.pdf binary

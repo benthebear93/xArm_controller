@@ -1,0 +1,12 @@
+{
+  "source_pdf": "calib.io_CHARUCO_210x297_9x6_30_22_DICT_4X4.pdf",
+  "squares_columns_rows": [6, 9],
+  "square_size_mm": 27.3,
+  "marker_size_mm": 20.3,
+  "dimension_source": "User measurement of the mounted printed board, 2026-10-19",
+  "nominal_pdf_square_size_mm": 30.0,
+  "nominal_pdf_marker_size_mm": 22.0,
+  "dictionary": "DICT_4X4_50",
+  "legacy_pattern": false,
+  "marker_ids": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
+}

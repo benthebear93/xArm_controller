@@ -1,3 +1,49 @@
-.venv/
+# Local Python environments and caches
+.venv*/
+venv/
+env/
 __pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.ipynb_checkpoints/
+
+# Build and test outputs (keep the bundled SDK wheel in vendor/)
+/build/
+/dist/
+/tests/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+
+# Unreleased hardware prototypes (keep local design files)
+/hardware/
+
+# Captured images, calibration sessions, motion plans and generated reports
+/output/
+/logs/
+*.log
+*.tmp
+
+# Local environment, credentials and agent state
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+/.aws/
+/.codex/
+/.agents/
+
+# Editor/OS files and Blender backups
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+*.blend[0-9]
+.DS_Store
+Thumbs.db
