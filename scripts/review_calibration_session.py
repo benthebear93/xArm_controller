@@ -11,10 +11,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from calibration_core import (
-    average_transform, check_excitation, inverse, park_eye_to_hand, pose_error,
-    read_json, residuals, summarize_residuals, write_json,
-)
+from calibration_core import check_excitation, park_eye_to_hand, residuals, summarize_residuals
+from geometry import average_transform, inverse, pose_error
+from io_utils import read_json, write_json
 from plan_camera_coverage import analyze, board_geometry, camera_points
 from robot_common import run_cli
 
@@ -47,7 +46,7 @@ def review(directory, output):
         crop = cv2.resize(image[y0:y0 + 280, x0:x0 + 320], (320, 280))
         tile = np.zeros((330, 320, 3), np.uint8)
         tile[50:] = crop
-        cv2.putText(tile, f"#{sample['id']} | {len(detection['ids'])}/40 corners", (8, 19),
+        cv2.putText(tile, f"#{sample['id']} | {len(detection['ids'])}/{observation['total_corners']} corners", (8, 19),
                     cv2.FONT_HERSHEY_SIMPLEX, .5, (240, 240, 240), 1, cv2.LINE_AA)
         cv2.putText(tile, f"pattern fully in frame: {observation['pattern_fully_visible']}", (8, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, .45, (180, 200, 230), 1, cv2.LINE_AA)

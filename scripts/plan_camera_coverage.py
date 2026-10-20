@@ -11,67 +11,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from calibration_core import (
-    DEFAULT_BOARD, BoardDetector, camera_arrays, inverse, read_json,
-    transform, validate_transform, write_json,
-)
-from calibrate_eye_to_hand import RealSenseCamera, utc_now
+from calibration_core import BoardDetector, DEFAULT_BOARD, Projection
+from geometry import inverse, transform, validate_transform
+from io_utils import read_json, utc_now, write_json
+from realsense_camera import RealSenseCamera, add_camera_arguments
 from robot_common import run_cli
-
-
-class Projection:
-    """Use SDK deprojection for inverse Brown; never mislabel it as OpenCV Brown."""
-
-    def __init__(self, camera):
-        self.camera = camera
-        self.size = np.asarray(camera["image_size"])
-        self.matrix = np.asarray(camera["matrix"], dtype=float)
-        self.inverse_brown = camera["distortion_model"] == "inverse_brown_conrady"
-        if self.inverse_brown:
-            import pyrealsense2 as rs
-
-            # Validate numeric fields separately from the incompatible distortion convention.
-            camera_arrays(dict(camera, distortion_model="opencv"))
-            if len(camera["dist_coeffs"]) != 5:
-                raise ValueError("RealSense inverse Brown requires five coefficients")
-            self.rs = rs
-            self.intr = rs.intrinsics()
-            self.intr.width, self.intr.height = map(int, self.size)
-            self.intr.fx, self.intr.fy = self.matrix[0, 0], self.matrix[1, 1]
-            self.intr.ppx, self.intr.ppy = self.matrix[0, 2], self.matrix[1, 2]
-            self.intr.model = rs.distortion.inverse_brown_conrady
-            self.intr.coeffs = camera["dist_coeffs"]
-        else:
-            self.matrix, self.distortion = camera_arrays(camera)
-
-    def rays(self, pixels):
-        pixels = np.asarray(pixels, dtype=float).reshape(-1, 2)
-        if self.inverse_brown:
-            return np.asarray([self.rs.rs2_deproject_pixel_to_point(self.intr, p.tolist(), 1.)
-                               for p in pixels])
-        normalized = cv2.undistortPoints(pixels[:, None], self.matrix, self.distortion).reshape(-1, 2)
-        return np.c_[normalized, np.ones(len(pixels))]
-
-    def project(self, points):
-        points = np.asarray(points, dtype=float).reshape(-1, 3)
-        if not np.isfinite(points).all() or np.any(points[:, 2] <= 0):
-            raise ValueError("All projected points must be finite and in front of the camera")
-        if not self.inverse_brown:
-            return cv2.projectPoints(points, np.zeros(3), np.zeros(3),
-                                     self.matrix, self.distortion)[0].reshape(-1, 2)
-        # Invert the SDK's pixel->ray function numerically. SDK forward projection
-        # does not support inverse Brown, so do not call rs2_project_point_to_pixel.
-        normalized = points[:, :2] / points[:, 2:]
-        focal = np.array([self.matrix[0, 0], self.matrix[1, 1]])
-        pixels = normalized * focal + self.matrix[:2, 2]
-        for _ in range(50):
-            rays = self.rays(pixels)
-            error = (rays[:, :2] / rays[:, 2:] - normalized) * focal
-            # The SDK returns float32 rays; 0.001 px is below their useful precision.
-            if np.max(np.abs(error)) < 1e-3:
-                return pixels
-            pixels -= error
-        raise ValueError("Inverse Brown projection failed to converge")
 
 
 def board_geometry(board):
@@ -93,15 +37,7 @@ def analyze(image, camera, board):
         raise ValueError("Image resolution does not match camera metadata")
     detector = BoardDetector(board)
     detection = detector.detect(image)
-    objects, pixels = detector.points(detection)
-    rays = projection.rays(pixels)
-    normalized = np.ascontiguousarray(rays[:, :2] / rays[:, 2:])
-    ok, rvec, tvec = cv2.solvePnP(objects, normalized, np.eye(3), np.zeros(5))
-    if not ok:
-        raise ValueError("Cannot estimate board pose from current frame")
-    pose = transform(cv2.Rodrigues(rvec)[0], tvec)
-    reprojected = projection.project(camera_points(pose, objects))
-    rms = float(np.sqrt(np.mean(np.sum((reprojected - pixels) ** 2, axis=1))))
+    pose, rms = detector.estimate(detection, camera)
     if rms > 2:
         raise ValueError(f"Board pose reprojection error too large: {rms:.2f} px")
     center, boundary = board_geometry(board)
@@ -144,9 +80,7 @@ def propose(observation, projection, board, depth_factors=(1., .85, .70), tilt_d
                 target_center = ray * depth / ray[2]
                 angles = np.radians(tilt_deg) * np.array([
                     (row - 1) * .7, (column - 1) * .7, (layer - 1) * .35])
-                # Face the camera at each location before adding multi-axis tilt.
-                # Keeping the seed's 40-degree tilt everywhere would make lower
-                # views very oblique and waste their apparent board area.
+                # Face the camera before adding tilt to avoid oblique edge views.
                 normal = target_center / np.linalg.norm(target_center)
                 x_axis = seed[:3, 0] - normal * np.dot(seed[:3, 0], normal)
                 if np.linalg.norm(x_axis) < 1e-6:
@@ -214,10 +148,7 @@ def main(argv=None):
     parser.add_argument("--image", type=Path)
     parser.add_argument("--camera", type=Path)
     parser.add_argument("--capture", action="store_true", help="Capture a fresh RGB frame and metadata; no robot connection")
-    parser.add_argument("--serial")
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
-    parser.add_argument("--fps", type=int, default=30)
+    add_camera_arguments(parser)
     parser.add_argument("--board", type=Path, default=DEFAULT_BOARD)
     parser.add_argument("--calibration", type=Path, help="Optional preliminary calibration.json for robot-frame goals")
     parser.add_argument("--output", type=Path, default=Path("output/calibration/coverage_review"))

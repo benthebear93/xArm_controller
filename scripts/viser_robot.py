@@ -10,10 +10,10 @@ import time
 
 import numpy as np
 
-from calibration_core import (
-    finite_array, flange_from_tcp, pose_error, pose_to_transform,
-    read_json, transform, write_json,
+from geometry import (
+    finite_array, flange_from_tcp, pose_error, pose_to_transform, transform, transform_to_pose,
 )
+from io_utils import read_json, write_json
 from robot_common import ROBOT_IP, create_arm, read_result, run_cli
 
 MODEL_PATH = Path(__file__).resolve().parents[1] / "assets/robots/xarm7/xarm7_nohand.xml"
@@ -93,8 +93,6 @@ def demo_feedback(model):
     joints = [0, -14, 0, 52, 0, 66, 0]
     model.set_joints(joints)
     flange = model.flange()
-    from auto_calibrate import transform_to_pose
-
     return {"joints_deg": joints, "tcp_pose_mm_deg": transform_to_pose(flange),
             "tcp_offset_mm_deg": [0] * 6, "world_offset_mm_deg": [0] * 6,
             "state": 2, "error": 0, "warning": 0, "timestamp_unix": time.time()}

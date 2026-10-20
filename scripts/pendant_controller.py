@@ -2,14 +2,12 @@
 
 from collections import deque
 from copy import deepcopy
-from datetime import datetime, timezone
-import json
 import math
-from pathlib import Path
 import threading
 import time
 
-from robot_common import ROBOT_IP, check, create_arm, read_result
+from io_utils import utc_now, write_json
+from robot_common import ROBOT_IP, check, create_arm, finite_vector, read_result
 
 MODES = {"Joint": 4, "TCP Base": 5, "TCP Tool": 5}
 HOME_MODE = "Home"
@@ -18,13 +16,6 @@ HOME_TOLERANCE_DEG = 0.05
 COMMAND_DURATION = 0.2  # Controller-side timeout; never send indefinite velocity.
 INPUT_LEASE = 0.15  # UI must renew a held input while its window has focus.
 FEEDBACK_TIMEOUT = 0.4
-
-
-def finite_vector(value, length, label):
-    result = [float(v) for v in value]
-    if len(result) != length or not all(math.isfinite(v) for v in result):
-        raise ValueError(f"Invalid {label}")
-    return result
 
 
 def velocity_vector(mode, axis, direction, speed):
@@ -473,17 +464,14 @@ def capture_pose(snapshot, name, ip, demo=False):
         raise ValueError("Pose capture requires fresh feedback and released jog controls")
     if snapshot["state"] not in (0, 2, 4) or snapshot["queued"] or snapshot["error"] or snapshot["warning"]:
         raise ValueError("Pose capture requires an idle robot without faults")
-    return dict(name=name.strip(), captured_at=datetime.now(timezone.utc).isoformat(),
+    return dict(name=name.strip(), captured_at=utc_now(),
                 robot_ip=ip, demo=demo, joints_deg=list(snapshot["joints"]),
                 tcp_mm_deg=list(snapshot["tcp"]), tcp_offset_mm_deg=list(snapshot["tcp_offset"]),
                 world_offset_mm_deg=list(snapshot["world_offset"]))
 
 
 def export_poses(path, poses):
-    data = {"format": "xarm7-taught-poses", "version": 1, "poses": poses}
-    # Serialize before opening the destination; reject NaN/Infinity in an export.
-    content = json.dumps(data, indent=2, allow_nan=False) + "\n"
-    Path(path).write_text(content, encoding="utf-8")
+    write_json(path, {"format": "xarm7-taught-poses", "version": 1, "poses": poses})
 
 
 class DemoArm:

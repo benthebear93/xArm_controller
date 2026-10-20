@@ -1,8 +1,11 @@
 """Move xArm through a bounded local or wide sweep and capture ChArUco views.
 
-Start with a rigid flange-mounted board visible to the fixed camera. --dry-run
-performs camera/robot/IK/FK checks and saves a motion plan WITHOUT enabling motion.
-Normal execution moves the robot. This is not an obstacle/collision planner.
+Start with a rigid flange-mounted board visible to the fixed camera. By default,
+perform camera/robot/IK/FK checks and save a motion plan WITHOUT enabling motion.
+Only --execute enables robot motion. This is not an obstacle/collision planner.
+Defaults: wide sweep, fixed factory intrinsics + joint calibration, latest captured session's start plan,
+and a new timestamped output session. Use --current-pose to start where you are.
+Verification defaults: ten local capture poses around the current pose, no return.
 Neither pattern guarantees image-wide coverage or calibrated camera depth diversity.
 --pattern wide reaches in robot base +X, lifts in +Z and sweeps sideways in Y.
 Use scripts/plan_camera_coverage.py to review coverage goals after an initial calibration.
@@ -10,6 +13,8 @@ Use scripts/plan_camera_coverage.py to review coverage goals after an initial ca
 
 import argparse
 from datetime import datetime
+import hashlib
+import json
 import os
 from pathlib import Path
 import time
@@ -18,38 +23,34 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from calibration_core import (
-    DEFAULT_BOARD, BoardDetector, InsufficientCornersError, UnsupportedCameraModelError, camera_arrays, check_excitation, finite_array,
-    flange_from_tcp, pose_error, pose_to_transform, read_json,
-    validate_transform, write_json,
-)
 from calibrate_eye_to_hand import (
-    RealSenseCamera, assert_stationary, capture_sample, choose_camera, overlay,
-    positive, read_robot, save_sample, session_path, solve, utc_now,
+    assert_stationary, capture_sample, choose_camera, new_session, overlay, read_robot, save_sample,
+    session_path, solve, verify,
 )
+from calibration_core import (
+    BoardDetector, DEFAULT_BOARD, InsufficientCornersError, Projection, check_excitation,
+)
+from geometry import (
+    finite_array, flange_from_tcp, pose_error, pose_to_transform, transform_to_pose,
+    validate_transform,
+)
+from io_utils import read_json, utc_now, write_json
 from joint_motion import solve_alignment_ik
+from local_ik import solve_local_ik
+from realsense_camera import RealSenseCamera, add_camera_arguments, require_same_camera
 from robot_common import (
-    ROBOT_IP, check, position_motion, read_result, require_clear_status,
-    require_idle, robot_session, run_cli,
+    ROBOT_IP, check, position_motion, positive, read_result, require_clear_status,
+    robot_session, run_cli,
+)
+from verification_capture import (
+    generate_verification_targets, latest_calibration, load_reference, require_new_pose,
 )
 
 PATH_STEP_DEG = 1.0
 MAX_JOINT_EXCURSION_DEG = 30.0
 POLL_SECONDS = 0.05
 TRACKING_MIN_CORNERS = 6  # Presence monitoring only; saved captures still require 12.
-
-
-def transform_to_pose(value):
-    """Meters/rotation matrix to the SDK's mm and fixed XYZ Euler degrees."""
-    value = validate_transform(value)
-    r = value[:3, :3]
-    cp = np.hypot(r[0, 0], r[1, 0])
-    pitch = np.arctan2(-r[2, 0], cp)
-    if cp > 1e-8:
-        roll, yaw = np.arctan2(r[2, 1], r[2, 2]), np.arctan2(r[1, 0], r[0, 0])
-    else:
-        roll, yaw = np.arctan2(-r[1, 2], r[1, 1]), 0.0
-    return np.r_[1000 * value[:3, 3], np.degrees([roll, pitch, yaw])].tolist()
+CALIBRATION_DIR = Path("output/calibration")
 
 
 def generate_targets(seed_flange, radius_mm=25, tilt_deg=12):
@@ -96,9 +97,7 @@ def generate_wide_targets(seed_flange, forward_mm=220, lift_mm=150, side_mm=80, 
         targets.append(target)
     anchors = [
         (1., -1., .27), (1., 1., .27),
-        # Captures 11-19 previously clipped the top of the D455 image. Lower
-        # only these three anchors: at lift=150 mm, side tops drop 30 mm and
-        # the center top drops 79.5 mm. Keep their XY and all rotations intact.
+        # Keep the upper capture row within 47% of the requested lift envelope.
         (.82, 1., .47), (.82, 0., .47), (.82, -1., .47),
         (.55, -1., .13), (.55, 1., .13),
     ]
@@ -249,15 +248,34 @@ def plan_motion(arm, seed, args, tick=lambda: None):
     targets = (generate_wide_targets(seed_flange, args.forward_mm, args.lift_mm, args.side_mm, args.tilt_deg,
                                      args.drop_mm, args.lower_side_mm)
                if args.pattern == "wide" else generate_targets(seed_flange, args.radius_mm, args.tilt_deg))
+    if args.verify:
+        targets = generate_verification_targets(seed_flange, args)
+        for target in targets[1:]:
+            require_new_pose(target, args.verification_training_poses)
     waypoints = wide_waypoints(targets) if args.pattern == "wide" else [(t, True) for t in targets]
+    if args.verify:
+        waypoints[0] = (waypoints[0][0], False)  # The training seed is only a staging pose.
     limit = joint_excursion_limit(args)
+    use_local_ik = args.verify and args.pattern == "local" and tuple(arm.version_number) < (2, 7, 103)
+    if use_local_ik:
+        print(f"Local verification IK: controller FK search seeded by the previous joints; "
+              f"all joints remain within {limit:g} deg of the start.", flush=True)
     for index, (flange, capture) in enumerate(waypoints):
         tick()
         tcp = transform_to_pose(flange @ offset)
-        joints = seed_joints if index == 0 else np.asarray(solve_alignment_ik(arm, tcp, previous.tolist()))
+        if index == 0:
+            joints = seed_joints
+        elif use_local_ik:
+            print(f"Plan {index + 1:02d}/{len(waypoints)}: finding nearby joint solution...", flush=True)
+            joints = solve_local_ik(lambda q: forward_flange(arm, q, seed), flange,
+                                    previous, seed_joints, limit, tick)
+        else:
+            joints = np.asarray(solve_alignment_ik(arm, tcp, previous.tolist()))
         joints = finite_array(joints, (7,), "IK joints")
         if np.max(np.abs(joints - seed_joints)) > limit:
-            raise ValueError(f"Pose {index + 1}: IK changes a joint by >{limit:g} deg from start")
+            joint = int(np.argmax(np.abs(joints - seed_joints)))
+            raise ValueError(f"Pose {index + 1}: IK changes J{joint + 1} by "
+                             f"{abs(joints[joint] - seed_joints[joint]):.1f} deg, >{limit:g} deg from start")
         limited = read_result(arm.is_joint_limit(joints.tolist(), is_radian=False), "Joint limits")
         require_clear_status(arm)
         if limited is not False:
@@ -424,10 +442,28 @@ def execute_plan(arm, camera, detector, pose_camera, seed, plan, session, args, 
     assert_stationary(seed, read_robot(arm))
     preview.refresh()
     with position_motion(arm):
+        if args.verify:
+            # A stop before the first new capture must still leave a retraceable
+            # plan available if an explicit return is needed later.
+            session["motion_started"] = True
+            write_json(session_path(args.session), session)
         assert_stationary(seed, read_robot(arm))
         previous = np.asarray(seed["joints_deg"])
+        capture_total = sum(t.get("capture", True) for t in plan)
+        capture_index = 0
         for target in plan:
             preview.status = f"Pose {target['index']}/{len(plan)} - saved {len(session['samples'])}"
+            phase = "verification" if args.verify else "calibration"
+            action = "capture" if target.get("capture", True) else "transit"
+            if args.verify and action == "capture":
+                capture_index += 1
+                print(f"[verification] Pose {capture_index}/{capture_total}: moving; "
+                      f"saved {len(session['samples'])}/{capture_total}", flush=True)
+            elif args.verify and target["index"] == 1:
+                print("[verification] Checking current starting pose", flush=True)
+            else:
+                print(f"[{phase}] Move {target['index']}/{len(plan)} ({action}); "
+                      f"saved {len(session['samples'])}/{capture_total}", flush=True)
             # A stopped/paused robot is never silently re-enabled between poses.
             move_to(arm, target, previous, seed, args, preview.tick)
             previous = np.asarray(target["joints_deg"])
@@ -435,6 +471,8 @@ def execute_plan(arm, camera, detector, pose_camera, seed, plan, session, args, 
                 continue
             image, record = capture_sample(arm, camera, detector, pose_camera,
                                            session["samples"], args.settle)
+            if args.verify:
+                require_new_pose(record["robot"]["T_base_flange"], args.verification_training_poses)
             record_capture_visibility(image, record, detector)
             record["planned_pose_index"] = target["index"]
             save_sample(args.session, session, image, record)
@@ -452,7 +490,9 @@ def plan_document(seed, plan, args, fit_intrinsics=None):
     return {
         "schema_version": 1, "created_utc": utc_now(), "robot_ip": args.ip,
         "purpose": "wide_base_frame_sweep" if wide else "local_bootstrap_sweep", "image_coverage_checked": False,
-        "pose_pattern": "forward_lift_lower_corners_v3_lowered_top" if wide else "early_opposed_tilts_with_3d_translation_v2",
+        "task": "verification" if args.verify else "calibration",
+        "pose_pattern": ("independent_verification_10_v1" if args.verify else
+                         "forward_lift_lower_corners_v3_lowered_top" if wide else "early_opposed_tilts_with_3d_translation_v2"),
         "capture_pose_count": sum(t.get("capture", True) for t in plan),
         "waypoint_count": len(plan),
         "translation_frame": "robot_base" if wide else "seed_flange",
@@ -499,6 +539,8 @@ def plan_start_return(arm, document, args, tick=lambda: None):
             options += ["--" + flag, str(offsets[key])]
     elif document["purpose"] != "local_bootstrap_sweep":
         raise ValueError("Expected an original calibration sweep plan")
+    else:
+        options += ["--pattern", "local"]
     return_args = parse_args(options)
     targets = document["targets"]
     joints = np.asarray([finite_array(t["joints_deg"], (7,), "saved joints") for t in targets])
@@ -589,16 +631,51 @@ def prepare_start(arm, camera, detector, pose_camera, args):
             previous = np.asarray(current["joints_deg"])
             for target in route:
                 preview.status = f"Return to start {target['index']}/{len(route)}"
+                print(f"[return] Move {target['index']}/{len(route)} toward the start pose", flush=True)
                 move_to(arm, target, previous, document["seed"], return_args, preview.tick)
                 previous = np.asarray(target["joints_deg"])
             check(arm.set_state(4), "Stop at calibration start")
         assert_stationary(document["seed"], read_robot(arm))
+        print("[return] Start pose reached. Checking the starting view and new capture path.", flush=True)
     return True
+
+
+def latest_start_plan(directory, robot_ip):
+    """Select a capture/motion session, never a dry-run/preview or return plan."""
+    candidates = []
+    for path in directory.glob("*/motion_plan.json"):
+        session_file = session_path(path.parent)
+        if not session_file.exists():
+            continue
+        document = read_json(path)
+        session = read_json(session_file)
+        if (document.get("robot_ip") != robot_ip or session.get("robot_ip") != robot_ip
+                or document.get("purpose") not in ("wide_base_frame_sweep", "local_bootstrap_sweep")
+                or not (session.get("samples") or session.get("motion_started"))):
+            continue
+        created = datetime.fromisoformat(session["created_utc"])
+        candidates.append((created.timestamp(), str(path), path))
+    return max(candidates)[2] if candidates else None
 
 
 def run(args):
     if session_path(args.session).exists():
         raise ValueError("Session already contains captures; choose a new --session")
+    board_config = read_json(args.board)
+    calibration = None
+    if args.verify:
+        args.calibration = args.calibration or latest_calibration(CALIBRATION_DIR, args.ip)
+        calibration, args.verification_training_poses = load_reference(
+            args.calibration, args.ip, board_config, args.session,
+        )
+        print(f"Verification reference (fixed): {args.calibration}", flush=True)
+        # Pin the loaded values, including camera intrinsics, for this whole run.
+        write_json(args.session / "reference_calibration.json", calibration)
+    if not args.verify and not args.start_plan and not args.current_pose and not args.plan_only:
+        args.start_plan = latest_start_plan(CALIBRATION_DIR, args.ip)
+    print(f"Mode: {'dry-run' if args.dry_run else 'execute'}; pattern: {args.pattern}; "
+          f"session: {args.session}", flush=True)
+    print(f"Start plan: {args.start_plan}" if args.start_plan else "Start: current robot pose", flush=True)
     if args.plan_only:
         # Planning for Viser does not need a camera or board detection.
         with robot_session(args.ip, dry_run=True) as arm:
@@ -607,18 +684,19 @@ def run(args):
             write_json(args.session / "motion_plan.json", plan_document(seed, plan, args))
         print(f"Plan only: no motion enabled. Saved {args.session / 'motion_plan.json'}")
         return
-    board_config = read_json(args.board)
     detector = BoardDetector(board_config)
     with RealSenseCamera(args) as camera, robot_session(args.ip, dry_run=True) as arm:
         seed = read_robot(arm)
         camera_config = choose_camera(camera.metadata, args.intrinsics)
+        if calibration is not None:
+            require_same_camera(camera.metadata, calibration["camera"])
+            camera_config = calibration["camera"]
         fit_camera_intrinsics = args.fit_intrinsics
-        try:
-            camera_arrays(camera_config)
-        except UnsupportedCameraModelError:
-            fit_camera_intrinsics = True
-            print(f"Factory distortion model '{camera_config['distortion_model']}' is not OpenCV-compatible. "
-                  "Automatically enabling ChArUco intrinsic fitting after collection.", flush=True)
+        if not fit_camera_intrinsics:
+            Projection(camera_config)
+            print(("Verification: camera intrinsics and both transforms stay fixed. " if args.verify else
+                   "Fixed camera intrinsics + joint camera/board transform optimization. ")
+                  + f"Distortion: {camera_config['distortion_model']}.", flush=True)
         if fit_camera_intrinsics:
             # Do not reject frames using factory intrinsics that will be replaced.
             # Robot stability and ChArUco geometry checks still apply to every capture.
@@ -647,28 +725,37 @@ def run(args):
             "camera_timestamp": initial_sample["camera_timestamp"], "visibility": visibility,
         })
         print(f"Initial board: {len(initial_sample['detection']['ids'])} corners", flush=True)
-        print((f"Wide BASE-frame sweep: +X {args.forward_mm:g} mm, upper captures +Z {.47 * args.lift_mm:g} mm, "
-               f"Y +/-{args.side_mm:g} mm; lower corners Z -{args.drop_mm:g} mm, Y +/-{args.lower_side_mm:g} mm"
-               if args.pattern == "wide" else
-               f"Local flange sweep: 25 poses; radius {args.radius_mm:g} mm")
-              + f"; tilt {args.tilt_deg:g} deg; speed {args.speed:g} deg/s", flush=True)
+        if args.verify:
+            print("Verification: 10 new capture poses; starting pose is transit only; no calibration refit.", flush=True)
+        if args.verify and args.pattern == "local":
+            print(f"Local verification: 10 capture poses, {0.8 * args.radius_mm:g} mm from current start, "
+                  f"tilt {0.8 * args.tilt_deg:g} deg; speed {args.speed:g} deg/s", flush=True)
+        else:
+            print((f"Wide BASE-frame sweep: +X {args.forward_mm:g} mm, upper captures +Z {.47 * args.lift_mm:g} mm, "
+                   f"Y +/-{args.side_mm:g} mm; lower corners Z -{args.drop_mm:g} mm, Y +/-{args.lower_side_mm:g} mm"
+                   if args.pattern == "wide" else
+                   f"Local flange sweep: 25 poses; radius {args.radius_mm:g} mm")
+                  + f"; tilt {args.tilt_deg:g} deg; speed {args.speed:g} deg/s", flush=True)
         print("IK/FK checks do not model obstacles or the board's swept volume.", flush=True)
         with Preview(camera, detector, pose_camera, args.headless) as preview:
             plan = plan_motion(arm, seed, args, preview.tick)
-            args.session.mkdir(parents=True, exist_ok=True)
             write_json(args.session / "motion_plan.json", plan_document(seed, plan, args, fit_camera_intrinsics))
             if args.dry_run:
-                if not cv2.imwrite(str(args.session / "initial_view.png"), initial_image):
-                    raise RuntimeError("Could not save initial_view.png")
                 print(f"Dry run passed. No motion enabled. Plan: {args.session / 'motion_plan.json'}")
                 return
-            session = {
-                "schema_version": 1, "setup": "eye_to_hand", "translation_unit": "m",
-                "created_utc": utc_now(), "robot_ip": args.ip, "board": board_config,
-                "camera": camera_config, "samples": [], "collection": f"automatic_{args.pattern}_sweep",
-                "fit_intrinsics": fit_camera_intrinsics,
-                "status": "collecting",
-            }
+            session = new_session(
+                args.ip, board_config, camera_config, collection=f"automatic_{args.pattern}_sweep",
+                fit_intrinsics=fit_camera_intrinsics, status="collecting",
+            )
+            if calibration is not None:
+                session["collection"] = f"automatic_{args.pattern}_verification"
+                session["verification"] = {
+                    "source_calibration": str(Path(args.calibration).resolve()),
+                    "reference_copy": "reference_calibration.json",
+                    "reference_sha256": hashlib.sha256(json.dumps(calibration, sort_keys=True).encode()).hexdigest(),
+                    "calibration_refit": False,
+                    "pose_novelty": "Reject a capture if any training pose is within both 10 mm and 5 degrees",
+                }
             write_json(session_path(args.session), session)
             try:
                 execute_plan(arm, camera, detector, pose_camera, seed, plan, session, args, preview)
@@ -690,43 +777,76 @@ def run(args):
             finally:
                 write_json(session_path(args.session), session)
     # The arm is stopped/disconnected before numerical calibration starts.
+    if args.verify:
+        print("Collection complete; checking the fixed calibration offline.", flush=True)
+        verify(SimpleNamespace(
+            session=args.session, calibration=args.session / "reference_calibration.json",
+            fit_intrinsics=False, exclude=[], max_reprojection_px=2.0,
+            max_translation_rms_mm=3.0, max_rotation_rms_deg=1.0,
+        ))
+        return
     print("Collection complete; solving calibration offline.", flush=True)
     solve(SimpleNamespace(
         session=args.session, intrinsics=None, fit_intrinsics=fit_camera_intrinsics,
-        exclude=[], max_reprojection_px=2.0, method="park", output=None,
+        exclude=[], max_reprojection_px=2.0, method="joint", output=None,
         max_translation_rms_mm=3.0, max_rotation_rms_deg=1.0,
     ))
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    description = ("Capture ten new robot poses and verify a fixed calibration. "
+                   "Default: dry-run, latest successful calibration, ten local poses around the CURRENT pose, "
+                   "no return, and a new output session. "
+                   "Only --execute enables motion; calibration is never refitted."
+                   if argv is not None and "--verify" in argv else __doc__)
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--ip", default=ROBOT_IP)
-    parser.add_argument("--start-plan", type=Path,
-                        help="Use this saved motion_plan.json's seed; retrace its waypoints to return first")
-    parser.add_argument("--serial", help="RealSense serial number")
+    parser.add_argument("--verify", action="store_true", help="Capture 10 new poses and verify fixed calibration; never refit")
+    parser.add_argument("--calibration", type=Path, help="Verification reference (default: latest successful calibration)")
+    start = parser.add_mutually_exclusive_group()
+    start.add_argument("--start-plan", type=Path,
+                       help="Return along this saved plan (calibration default: latest captured session; verification: opt-in only)")
+    start.add_argument("--current-pose", action="store_true", help="Start at the current pose instead of returning (verification default)")
+    add_camera_arguments(parser)
     parser.add_argument("--board", type=Path, default=DEFAULT_BOARD)
-    parser.add_argument("--session", type=Path, default=Path("output/calibration") / datetime.now().strftime("auto_%Y%m%d_%H%M%S"))
-    parser.add_argument("--width", type=int, default=1280)
-    parser.add_argument("--height", type=int, default=720)
-    parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--pattern", choices=("local", "wide"), default="local")
+    parser.add_argument("--session", type=Path,
+                        help="Output folder (default: new timestamped session in output/calibration)")
+    parser.add_argument("--pattern", choices=("local", "wide"), help="Capture pattern (calibration default: wide; verification default: local)")
     parser.add_argument("--forward-mm", type=positive, default=220., help="Wide sweep: robot BASE +X reach")
     parser.add_argument("--lift-mm", type=positive, default=150., help="Wide sweep: BASE Z envelope scale; upper captures use 47%% of this")
     parser.add_argument("--side-mm", type=positive, default=80., help="Wide sweep: robot BASE +/-Y span")
     parser.add_argument("--drop-mm", type=float, default=100., help="Wide sweep: lower row below seed in BASE Z (0 disables)")
     parser.add_argument("--lower-side-mm", type=positive, default=150., help="Wide sweep: lower corners at BASE Y +/- this distance")
     parser.add_argument("--radius-mm", type=positive, default=25.0)
-    parser.add_argument("--tilt-deg", type=positive, default=12.0)
+    parser.add_argument("--tilt-deg", type=positive,
+                        help="Tilt scale (default: 10 for local verification, 12 otherwise)")
     parser.add_argument("--speed", type=positive, default=3.0, help="Joint speed, deg/s")
     parser.add_argument("--acceleration", type=positive, default=10.0, help="Joint acceleration, deg/s^2")
     parser.add_argument("--settle", type=positive, default=0.8)
     parser.add_argument("--intrinsics", type=Path)
-    parser.add_argument("--fit-intrinsics", action="store_true",
-                        help="Fit camera intrinsics from captured views (automatic for unsupported factory distortion)")
+    parser.add_argument("--fit-intrinsics", action=argparse.BooleanOptionalAction, default=False,
+                        help="Explicitly refit intrinsics before joint calibration (default: keep factory/supplied values fixed)")
     parser.add_argument("--headless", action="store_true", help="No preview window; Ctrl+C requests stop")
-    parser.add_argument("--dry-run", action="store_true", help="Read/plan only, without enabling motors or moving")
-    parser.add_argument("--plan-only", action="store_true", help="Check and save a robot motion plan for Viser; no camera or motion")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", default=True,
+                      help="Read/plan only, without enabling motors or moving (default)")
+    mode.add_argument("--execute", dest="dry_run", action="store_false",
+                      help="Enable actual robot motion and capture, then solve or verify as selected")
+    mode.add_argument("--plan-only", action="store_true", help="Check and save a robot motion plan for Viser; no camera or motion")
     args = parser.parse_args(argv)
+    if args.pattern is None:
+        args.pattern = "local" if args.verify else "wide"
+    if args.tilt_deg is None:
+        args.tilt_deg = 10.0 if args.verify and args.pattern == "local" else 12.0
+    if args.verify and args.start_plan is None:
+        args.current_pose = True
+    if args.session is None:
+        prefix = "verify" if args.verify else "auto"
+        args.session = CALIBRATION_DIR / datetime.now().strftime(prefix + "_%Y%m%d_%H%M%S_%f")
+    if args.verify and (args.fit_intrinsics or args.intrinsics):
+        parser.error("Verification uses the saved camera model; --fit-intrinsics/--intrinsics are not allowed")
+    if args.calibration and not args.verify:
+        parser.error("--calibration is only used with --verify (or scripts/auto_verify.py)")
     if args.start_plan and args.plan_only:
         parser.error("--start-plan requires camera monitoring; use --dry-run instead of --plan-only")
     if not 5 <= args.radius_mm <= 50 or not 10 <= args.tilt_deg <= 20:
@@ -739,8 +859,6 @@ def parse_args(argv=None):
         parser.error("Require speed <=5 deg/s, acceleration <=20 deg/s^2, settle >=0.3 s")
     if args.intrinsics and args.fit_intrinsics:
         parser.error("Choose --intrinsics or --fit-intrinsics, not both")
-    if min(args.width, args.height, args.fps) <= 0:
-        parser.error("Stream dimensions and fps must be positive")
     return args
 
 

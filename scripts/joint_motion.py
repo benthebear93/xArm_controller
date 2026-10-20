@@ -3,14 +3,8 @@
 import math
 
 from robot_common import (
-    MOTION_TIMEOUT,
-    check,
-    parse_args,
-    position_motion,
-    read_result,
-    require_clear_status,
-    robot_session,
-    run_cli,
+    MOTION_TIMEOUT, check, finite_vector, parse_args, position_motion, read_result,
+    require_clear_status, robot_session, rotation_matrix, run_cli,
 )
 
 TARGET_RPY_DEG = (180.0, 0.0, 0.0)
@@ -19,25 +13,6 @@ ACCEL_DEG_S2 = 10.0
 POSITION_TOLERANCE_MM = 1.0
 ORIENTATION_TOLERANCE_DEG = 1.0
 MAX_JOINT_TRAVEL_DEG = 180.0
-
-
-def vector(values, size, label):
-    """Reject missing, malformed, or non-finite controller results."""
-    if values is None or len(values) != size or not all(math.isfinite(v) for v in values):
-        raise RuntimeError(f"Expected {size} finite {label} values: {values}")
-    return list(values)
-
-
-def rotation_matrix(rpy):
-    """Return Rz(yaw) Ry(pitch) Rx(roll) as a flat row-major matrix."""
-    roll, pitch, yaw = map(math.radians, rpy)
-    cr, cp, cy = math.cos(roll), math.cos(pitch), math.cos(yaw)
-    sr, sp, sy = math.sin(roll), math.sin(pitch), math.sin(yaw)
-    return (
-        cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr,
-        sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr,
-        -sp, cp * sr, cp * cr,
-    )
 
 
 def orientation_error_deg(rpy, target_rpy=(0.0, 0.0, 0.0)):
@@ -50,7 +25,7 @@ def orientation_error_deg(rpy, target_rpy=(0.0, 0.0, 0.0)):
 
 
 def verify_pose(pose, target, label):
-    pose = vector(pose, 6, label)
+    pose = finite_vector(pose, 6, label, error_type=RuntimeError)
     position_error = math.dist(pose[:3], target[:3])
     rotation_error = orientation_error_deg(pose[3:], target[3:])
     print(
@@ -84,20 +59,20 @@ def solve_alignment_ik(arm, target_pose, current):
                 "Review the target before retrying; the script will not clear this new warning."
             )
         raise RuntimeError(detail)
-    return vector(angles, 7, "IK joint angle")
+    return finite_vector(angles, 7, "IK joint angle", error_type=RuntimeError)
 
 
 def main():
     args = parse_args(__doc__)
     # Plan and validate without enabling motors, including during a normal run.
     with robot_session(args.ip, dry_run=True, clear_warning_14=args.clear_warning_14) as arm:
-        current = vector(read_result(
+        current = finite_vector(read_result(
             arm.get_servo_angle(is_radian=False, is_real=True), "Read current joint angles"
-        ), 7, "joint angle")
-        current_pose = vector(read_result(
+        ), 7, "joint angle", error_type=RuntimeError)
+        current_pose = finite_vector(read_result(
             arm.get_position(is_radian=False), "Read current TCP pose"
-        ), 6, "TCP pose")
-        world_offset = vector(arm.world_offset, 6, "world offset")
+        ), 6, "TCP pose", error_type=RuntimeError)
+        world_offset = finite_vector(arm.world_offset, 6, "world offset", error_type=RuntimeError)
         print(f"Current J1-J7 (deg): {current}")
         print(f"Current TCP [x,y,z,roll,pitch,yaw] (mm, deg): {current_pose}")
         print(f"World offset (mm, deg): {world_offset}")
@@ -147,9 +122,9 @@ def main():
 
         with position_motion(arm):
             # Refuse a stale plan if the arm was moved while the target was calculated.
-            latest = vector(read_result(
+            latest = finite_vector(read_result(
                 arm.get_servo_angle(is_radian=False, is_real=True), "Recheck current joints"
-            ), 7, "joint angle")
+            ), 7, "joint angle", error_type=RuntimeError)
             if max(abs(a - b) for a, b in zip(latest, current)) > 1.0:
                 raise RuntimeError("The robot moved during planning; run the example again")
             check(arm.set_servo_angle(

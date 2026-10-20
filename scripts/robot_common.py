@@ -2,11 +2,42 @@
 
 import argparse
 from contextlib import contextmanager
+import math
 import sys
 import time
 
 ROBOT_IP = "192.168.1.197"
 MOTION_TIMEOUT = 30  # seconds
+
+
+def finite_vector(values, length, label, error_type=ValueError):
+    """Normalize controller feedback and reject missing/non-finite values."""
+    try:
+        result = [float(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise error_type(f"Expected {length} finite {label} values") from exc
+    if len(result) != length or not all(math.isfinite(value) for value in result):
+        raise error_type(f"Expected {length} finite {label} values")
+    return result
+
+
+def rotation_matrix(rpy):
+    """Return Rz(yaw) Ry(pitch) Rx(roll) as a flat row-major matrix."""
+    roll, pitch, yaw = map(math.radians, rpy)
+    cr, cp, cy = math.cos(roll), math.cos(pitch), math.cos(yaw)
+    sr, sp, sy = math.sin(roll), math.sin(pitch), math.sin(yaw)
+    return (
+        cy * cp, cy * sp * sr - sy * cr, cy * sp * cr + sy * sr,
+        sy * cp, sy * sp * sr + cy * cr, sy * sp * cr - cy * sr,
+        -sp, cp * sr, cp * cr,
+    )
+
+
+def positive(value):
+    result = float(value)
+    if not math.isfinite(result) or result <= 0:
+        raise argparse.ArgumentTypeError("must be finite and positive")
+    return result
 
 
 def parse_args(description):

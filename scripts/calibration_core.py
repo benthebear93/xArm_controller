@@ -6,14 +6,13 @@ B_i = T_base_flange, Y = T_flange_board, X = T_base_camera,
 and C_i = T_camera_board.
 """
 
-import json
 from itertools import combinations
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from joint_motion import rotation_matrix
+from geometry import average_transform, finite_array, inverse, pose_error, transform, validate_transform
 
 DEFAULT_BOARD = Path(__file__).resolve().parents[1] / "assets/calibration/calib_io_charuco.json"
 METHODS = {
@@ -33,80 +32,6 @@ class UnsupportedCameraModelError(ValueError):
 
 class InsufficientCornersError(ValueError):
     """A fresh stationary frame may recover a transient detection shortage."""
-
-
-def read_json(path):
-    with Path(path).open(encoding="utf-8") as stream:
-        return json.load(stream)
-
-
-def write_json(path, data):
-    """Replace a JSON file atomically, never writing non-standard NaN values."""
-    path = Path(path)
-    payload = json.dumps(data, indent=2, allow_nan=False) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(payload, encoding="utf-8")
-    temporary.replace(path)
-
-
-def finite_array(values, shape, label):
-    result = np.asarray(values, dtype=np.float64)
-    if result.shape != shape or not np.isfinite(result).all():
-        raise ValueError(f"Expected finite {label} with shape {shape}")
-    return result
-
-
-def transform(rotation, translation):
-    result = np.eye(4)
-    result[:3, :3] = rotation
-    result[:3, 3] = np.asarray(translation).reshape(3)
-    return validate_transform(result)
-
-
-def validate_transform(value):
-    value = finite_array(value, (4, 4), "rigid transform")
-    rotation = value[:3, :3]
-    if (not np.allclose(value[3], [0, 0, 0, 1], atol=1e-8)
-            or not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-6)
-            or not np.isclose(np.linalg.det(rotation), 1, atol=1e-6)):
-        raise ValueError("Invalid rigid transform (rotation or homogeneous last row)")
-    return value
-
-
-def inverse(value):
-    value = validate_transform(value)
-    rotation = value[:3, :3].T
-    return transform(rotation, -rotation @ value[:3, 3])
-
-
-def pose_to_transform(pose_mm_deg):
-    pose = finite_array(pose_mm_deg, (6,), "xArm XYZ/RPY")
-    return transform(np.asarray(rotation_matrix(pose[3:])).reshape(3, 3), pose[:3] / 1000)
-
-
-def flange_from_tcp(pose_mm_deg, tcp_offset_mm_deg, world_offset_mm_deg):
-    world = pose_to_transform(world_offset_mm_deg)
-    if not np.allclose(world, np.eye(4), atol=1e-8):
-        raise ValueError(
-            "Calibration requires world offset [0,0,0,0,0,0] to use the physical robot base. "
-            "Review the world offset in Studio; this program does not change offsets."
-        )
-    return pose_to_transform(pose_mm_deg) @ inverse(pose_to_transform(tcp_offset_mm_deg))
-
-
-def pose_error(actual, expected):
-    """Translation distance in mm and shortest orientation difference in degrees."""
-    actual, expected = validate_transform(actual), validate_transform(expected)
-    cosine = (np.trace(actual[:3, :3].T @ expected[:3, :3]) - 1) / 2
-    return (float(1000 * np.linalg.norm(actual[:3, 3] - expected[:3, 3])),
-            float(np.degrees(np.arccos(np.clip(cosine, -1, 1)))))
-
-
-def average_transform(values):
-    u, _, vt = np.linalg.svd(np.sum([t[:3, :3] for t in values], axis=0))
-    rotation = u @ np.diag([1, 1, np.linalg.det(u @ vt)]) @ vt
-    return transform(rotation, np.mean([t[:3, 3] for t in values], axis=0))
 
 
 def make_board(config):
@@ -148,6 +73,71 @@ def camera_arrays(camera):
     if model == "none" and np.any(distortion != 0):
         raise ValueError("Distortion model 'none' must have zero coefficients")
     return matrix, distortion
+
+
+class Projection:
+    """Use SDK deprojection for inverse Brown; never mislabel it as OpenCV Brown."""
+
+    def __init__(self, camera):
+        self.camera = camera
+        self.size = np.asarray(camera["image_size"])
+        self.matrix = np.asarray(camera["matrix"], dtype=float)
+        self.inverse_brown = camera["distortion_model"] == "inverse_brown_conrady"
+        if self.inverse_brown:
+            import pyrealsense2 as rs
+
+            # Validate numeric fields separately from the incompatible distortion convention.
+            camera_arrays(dict(camera, distortion_model="opencv"))
+            if len(camera["dist_coeffs"]) != 5:
+                raise ValueError("RealSense inverse Brown requires five coefficients")
+            self.rs = rs
+            self.intr = rs.intrinsics()
+            self.intr.width, self.intr.height = map(int, self.size)
+            self.intr.fx, self.intr.fy = self.matrix[0, 0], self.matrix[1, 1]
+            self.intr.ppx, self.intr.ppy = self.matrix[0, 2], self.matrix[1, 2]
+            self.intr.model = rs.distortion.inverse_brown_conrady
+            self.intr.coeffs = camera["dist_coeffs"]
+        else:
+            self.matrix, self.distortion = camera_arrays(camera)
+
+    def rays(self, pixels):
+        pixels = np.asarray(pixels, dtype=float).reshape(-1, 2)
+        if self.inverse_brown:
+            return np.asarray([self.rs.rs2_deproject_pixel_to_point(self.intr, p.tolist(), 1.)
+                               for p in pixels])
+        normalized = cv2.undistortPoints(pixels[:, None], self.matrix, self.distortion).reshape(-1, 2)
+        return np.c_[normalized, np.ones(len(pixels))]
+
+    def pnp_inputs(self, pixels):
+        """Inverse Brown uses SDK rays expressed in ideal pixels with the same K."""
+        pixels = np.asarray(pixels, dtype=float).reshape(-1, 2)
+        if self.inverse_brown:
+            rays = self.rays(pixels)
+            ideal = (rays[:, :2] / rays[:, 2:] * np.array([self.matrix[0, 0], self.matrix[1, 1]])
+                     + self.matrix[:2, 2])
+            return ideal, self.matrix, np.zeros(5)
+        return pixels, self.matrix, self.distortion
+
+    def project(self, points):
+        points = np.asarray(points, dtype=float).reshape(-1, 3)
+        if not np.isfinite(points).all() or np.any(points[:, 2] <= 0):
+            raise ValueError("All projected points must be finite and in front of the camera")
+        if not self.inverse_brown:
+            return cv2.projectPoints(points, np.zeros(3), np.zeros(3),
+                                     self.matrix, self.distortion)[0].reshape(-1, 2)
+        # Invert the SDK's pixel->ray function numerically. SDK forward projection
+        # does not support inverse Brown, so do not call rs2_project_point_to_pixel.
+        normalized = points[:, :2] / points[:, 2:]
+        focal = np.array([self.matrix[0, 0], self.matrix[1, 1]])
+        pixels = normalized * focal + self.matrix[:2, 2]
+        for _ in range(50):
+            rays = self.rays(pixels)
+            error = (rays[:, :2] / rays[:, 2:] - normalized) * focal
+            # The SDK returns float32 rays; 0.001 px is below their useful precision.
+            if np.max(np.abs(error)) < 1e-3:
+                return pixels
+            pixels -= error
+        raise ValueError("Inverse Brown projection failed to converge")
 
 
 class BoardDetector:
@@ -203,15 +193,16 @@ class BoardDetector:
 
     def estimate(self, detection, camera, minimum=12):
         obj, img = self.points(detection, minimum)
-        matrix, distortion = camera_arrays(camera)
-        ok, rvec, tvec = cv2.solvePnP(obj, img, matrix, distortion, flags=cv2.SOLVEPNP_ITERATIVE)
+        projection = Projection(camera)
+        pnp_img, matrix, distortion = projection.pnp_inputs(img)
+        ok, rvec, tvec = cv2.solvePnP(obj, pnp_img, matrix, distortion, flags=cv2.SOLVEPNP_SQPNP)
         if not ok:
             raise ValueError("Could not estimate the board pose")
-        rvec, tvec = cv2.solvePnPRefineLM(obj, img, matrix, distortion, rvec, tvec)
+        rvec, tvec = cv2.solvePnPRefineLM(obj, pnp_img, matrix, distortion, rvec, tvec)
         pose = transform(cv2.Rodrigues(rvec)[0], tvec)
         if np.min((pose[:3, :3] @ obj.T + tvec.reshape(3, 1))[2]) <= 0:
             raise ValueError("Board pose is behind the camera")
-        projected = cv2.projectPoints(obj, rvec, tvec, matrix, distortion)[0].reshape(-1, 2)
+        projected = projection.project(obj @ pose[:3, :3].T + pose[:3, 3])
         rms = float(np.sqrt(np.mean(np.sum((projected - img) ** 2, axis=1))))
         if not np.isfinite(rms):
             raise ValueError("Non-finite board reprojection error")

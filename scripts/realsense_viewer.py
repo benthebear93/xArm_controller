@@ -9,20 +9,12 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 
-
-def positive_int(value):
-    value = int(value)
-    if value <= 0:
-        raise argparse.ArgumentTypeError("must be positive")
-    return value
+from realsense_camera import add_camera_arguments, positive_int
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--serial", help="Camera serial number (required if multiple cameras are connected)")
-    parser.add_argument("--width", type=positive_int, default=640)
-    parser.add_argument("--height", type=positive_int, default=480)
-    parser.add_argument("--fps", type=positive_int, default=30)
+    add_camera_arguments(parser, width=640, height=480)
     parser.add_argument("--depth", action="store_true", help="Also receive and preview the depth stream")
     parser.add_argument("--headless", action="store_true", help="No window; receive 90 frames by default")
     parser.add_argument("--frames", type=positive_int, help="Stop after this many matched frames")

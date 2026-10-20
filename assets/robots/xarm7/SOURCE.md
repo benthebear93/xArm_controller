@@ -3,7 +3,7 @@
 Copied from the local `mujoco_menagerie-main/ufactory_xarm7` distribution.
 Upstream: https://github.com/google-deepmind/mujoco_menagerie/tree/main/ufactory_xarm7
 
-The original `xarm7_nohand.xml`, its nine referenced STL files, README, and
+The original `xarm7_nohand.xml`, its nine referenced STL files, and
 BSD-3-Clause LICENSE are included unchanged. This is a simplified xArm7 model
 derived from UFACTORY's public robot description.
 

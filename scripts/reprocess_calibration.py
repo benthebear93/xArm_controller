@@ -11,8 +11,9 @@ import shutil
 
 import cv2
 
-from calibration_core import DEFAULT_BOARD, BoardDetector, read_json, write_json
-from calibrate_eye_to_hand import load_session, utc_now
+from calibrate_eye_to_hand import load_session
+from calibration_core import BoardDetector, DEFAULT_BOARD
+from io_utils import read_json, utc_now, write_json
 from robot_common import run_cli
 
 
