@@ -1,0 +1,194 @@
+{
+  "units": "mm",
+  "cad_valid": true,
+  "solid_count": 1,
+  "step_roundtrip_valid": true,
+  "stl_watertight": true,
+  "stl_winding_consistent": true,
+  "stl_body_count": 1,
+  "triangles": 94012,
+  "bounds_mm": [
+    [
+      -38.99806213378906,
+      -38.999515533447266,
+      0.0
+    ],
+    [
+      39.0,
+      38.999515533447266,
+      230.0
+    ]
+  ],
+  "removed_zero_area_stl_faces": 1,
+  "size_mm": [
+    77.99806213378906,
+    77.99903106689453,
+    230.0
+  ],
+  "overall_length_from_flange_contact_face_mm": 230.0,
+  "exact_cad_bounds_mm": [
+    [
+      -39.0,
+      -39.0,
+      0.0
+    ],
+    [
+      39.0,
+      39.0,
+      230.0
+    ]
+  ],
+  "projection_above_plate_mm": 226.0,
+  "straight_length_from_plate_to_equator_mm": 211.0,
+  "tip_hemisphere_radius_mm": 15.0,
+  "tip_hemisphere_equator_z_mm": 215.0,
+  "root_fillet_radius_mm": 2.0,
+  "hole_centres_xy_mm": [
+    [
+      17.67766952966369,
+      17.677669529663685
+    ],
+    [
+      -17.677669529663685,
+      17.67766952966369
+    ],
+    [
+      -17.677669529663692,
+      -17.677669529663685
+    ],
+    [
+      17.677669529663685,
+      -17.677669529663692
+    ]
+  ],
+  "countersink_depth_mm": 3.100000000000001,
+  "straight_bore_land_mm": 0.899999999999999,
+  "countersink_to_root_min_clearance_mm": 1.6000000000000014,
+  "screw_protrusion_if_head_flush_mm": 4.0,
+  "quarter_coupon_dimensions_preserved": true,
+  "cad_volume_mm3": 174341.760210789,
+  "analytic_volume_mm3": 174341.76021078893,
+  "stl_volume_mm3": 174328.82152878455,
+  "p1s_default_height_limit_mm": 250,
+  "p1s_height_margin_mm": 20.0,
+  "build_orientation": "Plate underside on bed; shaft vertical +Z; no support geometry required.",
+  "cross_section_checks": [
+    {
+      "feature": "mount_hole",
+      "z_mm": 0.2,
+      "centre_xy_mm": [
+        17.67766952966369,
+        17.677669529663685
+      ],
+      "expected_radius_mm": 3.3,
+      "max_error_mm": 0.00011436866632053011
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 0.2,
+      "centre_xy_mm": [
+        -17.677669529663685,
+        17.67766952966369
+      ],
+      "expected_radius_mm": 3.3,
+      "max_error_mm": 0.00011451447241483947
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 0.2,
+      "centre_xy_mm": [
+        -17.677669529663692,
+        -17.677669529663685
+      ],
+      "expected_radius_mm": 3.3,
+      "max_error_mm": 0.00011436368534090136
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 0.2,
+      "centre_xy_mm": [
+        17.677669529663685,
+        -17.677669529663692
+      ],
+      "expected_radius_mm": 3.3,
+      "max_error_mm": 0.00011442189630272992
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 3.8,
+      "centre_xy_mm": [
+        17.67766952966369,
+        17.677669529663685
+      ],
+      "expected_radius_mm": 6.2,
+      "max_error_mm": 0.0006876339606947113
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 3.8,
+      "centre_xy_mm": [
+        -17.677669529663685,
+        17.67766952966369
+      ],
+      "expected_radius_mm": 6.2,
+      "max_error_mm": 0.0006885963713321175
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 3.8,
+      "centre_xy_mm": [
+        -17.677669529663692,
+        -17.677669529663685
+      ],
+      "expected_radius_mm": 6.2,
+      "max_error_mm": 0.0006885963713383347
+    },
+    {
+      "feature": "mount_hole",
+      "z_mm": 3.8,
+      "centre_xy_mm": [
+        17.677669529663685,
+        -17.677669529663692
+      ],
+      "expected_radius_mm": 6.2,
+      "max_error_mm": 0.0006876339606991522
+    },
+    {
+      "feature": "root_fillet",
+      "z_mm": 5.0,
+      "expected_radius_mm": 15.267949192431123,
+      "max_error_mm": 0.0005753228270339861
+    },
+    {
+      "feature": "shaft_base",
+      "z_mm": 7.0,
+      "expected_radius_mm": 15.0,
+      "max_error_mm": 1.4777013046085585e-05
+    },
+    {
+      "feature": "shaft_middle",
+      "z_mm": 109.5,
+      "expected_radius_mm": 15.0,
+      "max_error_mm": 0.000746368978681744
+    },
+    {
+      "feature": "hemisphere_equator",
+      "z_mm": 215.0,
+      "expected_radius_mm": 15.0,
+      "max_error_mm": 6.254573410302555e-07
+    },
+    {
+      "feature": "hemisphere_mid",
+      "z_mm": 222.5,
+      "expected_radius_mm": 12.99038105676658,
+      "max_error_mm": 0.0007591746510797748
+    },
+    {
+      "feature": "hemisphere_tip",
+      "z_mm": 229.0,
+      "expected_radius_mm": 5.385164807134504,
+      "max_error_mm": 0.00355086567377505
+    }
+  ],
+  "scope": "Geometry verified. Four-hole printed fit, screwdriver access and mechanical strength need physical confirmation. No slicing or robot motion performed."
+}

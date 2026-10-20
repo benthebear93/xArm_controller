@@ -19,9 +19,6 @@ __pycache__/
 .coverage.*
 htmlcov/
 
-# Unreleased hardware prototypes (keep local design files)
-/hardware/
-
 # Captured images, calibration sessions, motion plans and generated reports
 /output/
 /logs/

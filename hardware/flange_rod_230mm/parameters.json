@@ -1,0 +1,17 @@
+{
+  "units": "mm",
+  "material": "PETG",
+  "overall_length_from_flange_contact_face_mm": 230.0,
+  "plate_diameter_mm": 78.0,
+  "plate_thickness_mm": 4.0,
+  "rod_diameter_mm": 30.0,
+  "root_fillet_radius_mm": 2.0,
+  "mount_pcd_mm": 50.0,
+  "mount_hole_angles_deg": [45, 135, 225, 315],
+  "clearance_diameter_mm": 6.6,
+  "countersink_diameter_mm": 12.8,
+  "countersink_angle_deg": 90.0,
+  "screw_overall_length_mm": 8.0,
+  "nominal_tip_tcp_xyz_mm": [0.0, 0.0, 230.0],
+  "length_reference": "Robot flange contact face / plate underside is z=0. Tip is z=230."
+}

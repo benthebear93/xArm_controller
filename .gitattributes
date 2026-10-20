@@ -1,2 +1,6 @@
 # Preserve PDF byte offsets and avoid treating document bytes as source diffs.
 *.pdf binary
+
+# Preserve generated CAD files as binary artifacts.
+*.step binary
+*.stl binary

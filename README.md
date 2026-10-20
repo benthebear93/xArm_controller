@@ -119,10 +119,11 @@ Model attribution and license: [SOURCE.md](assets/robots/xarm7/SOURCE.md).
 
 - `scripts/`: commands and shared geometry, camera, robot, and JSON helpers.
 - `assets/`: board configuration, printable targets, robot meshes, and licenses.
+- `hardware/`: tool CAD/STL files, build scripts, parameters, and print notes.
 - `vendor/`: pinned SDK wheel.
 
-Generated `output/`, environments, caches, local tests, and hardware prototypes
-are excluded from Git. A fresh clone contains no captured sessions or calibration
+Generated `output/`, environments, caches, and local tests are excluded from Git.
+A fresh clone contains no captured sessions or calibration
 results. Asset paths resolve relative to the repository; output paths are relative
 to the working directory. For local development tests:
 
